@@ -17,6 +17,7 @@ def extract_base_intensity(maxed, peaks, cells, threshold_peaks):
 
 def format_bases(values, labels, positions, cycles, bases):    
     index = (CYCLE, cycles), (CHANNEL, bases)
+    print("see if this work");
     try:
         df = ops.utils.ndarray_to_dataframe(values, index)
     except ValueError:
@@ -32,7 +33,7 @@ def format_bases(values, labels, positions, cycles, bases):
        .sort_values([CELL, READ, CYCLE])
        )
 
-    return df
+    return df, index
 
 
 def do_median_call(df_bases, cycles=12, channels=4, correction_only_in_cells=False):
@@ -43,14 +44,19 @@ def do_median_call(df_bases, cycles=12, channels=4, correction_only_in_cells=Fal
     if correction_only_in_cells:
         # first obtain transformation matrix W
         X_ = dataframe_to_values(df_bases.query('cell > 0'))
-        _, W = transform_medians(X_.reshape(-1, channels))
-
+        Y, W = transform_medians(X_.reshape(-1, channels))
+        print("printing X sent to medians")
+        print(X_)
         # then apply to all data
         X = dataframe_to_values(df_bases)
         Y = W.dot(X.reshape(-1, channels).T).T.astype(int)
     else:
         X = dataframe_to_values(df_bases)
+        print("printing X sent to medians")
+        print(X.reshape(-1, channels))
         Y, W = transform_medians(X.reshape(-1, channels))
+    print("before call barcode")
+    print(df_bases)
 
     df_reads = call_barcodes(df_bases, Y, cycles=cycles, channels=channels)
 
@@ -61,6 +67,9 @@ def clean_up_bases(df_bases):
     """Sort. Pre-processing for `dataframe_to_values`.
     """
     return df_bases.sort_values([WELL, TILE, CELL, READ, CYCLE, CHANNEL])
+    # The columns are sorted in the order specified in the list, so the resulting DataFrame will be sorted first by "WELL", then by "TILE", then by "CELL", and so on.
+
+
 
 
 def call_cells(df_reads):
@@ -130,11 +139,16 @@ def call_barcodes(df_bases, Y, cycles=12, channels=4):
         raise ValueError('supplied weird bases: {0}'.format(bases))
     df_reads = df_bases.drop_duplicates([WELL, TILE, READ]).copy()
     df_reads[BARCODE] = call_bases_fast(Y.reshape(-1, cycles, channels), bases)
-    Q = quality(Y.reshape(-1, cycles, channels))
+    dataForQuality=Y.reshape(-1, cycles, channels)
+    Q = quality(dataForQuality)
+    print(dataForQuality)
     # needed for performance later
     for i in range(len(Q[0])):
         df_reads['Q_%d' % i] = Q[:,i]
  
+
+    # This code is essentially creating a new DataFrame with only the columns "WELL", "TILE", "READ", "BARCODE", and "Q_min", 
+    # and discarding the other columns that contain the cycle and intensity information for each base call.  
     return (df_reads
         .assign(Q_min=lambda x: x.filter(regex='Q_\d+').min(axis=1))
         .drop([CYCLE, CHANNEL, INTENSITY], axis=1)
@@ -144,7 +158,7 @@ def call_barcodes(df_bases, Y, cycles=12, channels=4):
 def call_bases_fast(values, bases):
     """4-color: bases='ACGT'
     """
-    assert values.ndim == 3
+    assert values.ndim == 3 
     assert values.shape[2] == len(bases)
     calls = values.argmax(axis=2)
     calls = np.array(list(bases))[calls]

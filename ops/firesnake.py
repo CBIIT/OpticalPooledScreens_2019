@@ -204,7 +204,7 @@ class Snake():
             data = remove_channels(data, remove_index)
         
         maxed = scipy.ndimage.filters.maximum_filter(data, size=(1, 1, width, width))
-    
+        breakpoint()
         return maxed
 
     @staticmethod
@@ -213,7 +213,7 @@ class Snake():
         `threshold_peaks`. Output is labeled by `wildcards` (e.g., well and tile) and 
         label at that position in integer mask `cells`.
         """
-
+        print("test")
         if maxed.ndim == 3:
             maxed = maxed[None]
 
@@ -228,24 +228,26 @@ class Snake():
         values, labels, positions = (
             ops.in_situ.extract_base_intensity(maxed, peaks, cells, threshold_peaks))
 
-        df_bases = ops.in_situ.format_bases(values, labels, positions, cycles, bases)
+        df_bases, index = ops.in_situ.format_bases(values, labels, positions, cycles, bases)
 
         for k,v in sorted(wildcards.items()):
             df_bases[k] = v
 
-        return df_bases
+        #print (df_bases.size)
+        return df_bases, index, values, labels, positions
 
     @staticmethod
     def _call_reads(df_bases, peaks=None, correction_only_in_cells=True):
         """Median correction performed independently for each tile.
-        Use the `correction_only_in_cells` flag to specify if correction
+        Use the `correction_only_in_cells` flag to specify i f correction
         is based on reads within cells, or all reads.
         """
         if df_bases is None:
             return
         if correction_only_in_cells:
             if len(df_bases.query('cell > 0')) == 0:
-                return
+                return 
+                #if no element, then return
         
         cycles = len(set(df_bases['cycle']))
         channels = len(set(df_bases['channel']))
@@ -350,6 +352,104 @@ class Snake():
         return pd.concat(arr)
 
     @staticmethod
+    def _merge_sbs_phenotype(sbs_tables, phenotype_tables, barcode_table, sbs_cycles, 
+                             join='outer'):
+                             #sbs_tables=df_cells
+                             #barcode_table=barcode.csv
+                             #phenotype_tables= phenotype data obtained from skimage.measure.regionprops
+        if isinstance(sbs_tables, pd.DataFrame):
+            sbs_tables = [sbs_tables]
+        if isinstance(phenotype_tables, pd.DataFrame):
+            phenotype_tables = [phenotype_tables]
+            #check if they are dataframe
+        
+        cols = ['well', 'tile', 'cell']
+        df_sbs = pd.concat(sbs_tables).set_index(cols)
+        df_phenotype = pd.concat(phenotype_tables).set_index(cols)
+        df_combined = pd.concat([df_sbs, df_phenotype], join=join, axis=1).reset_index()
+        #SBS_CYCLES = [1, 2, 3, 4, 5, 7, 8, 9, 10]
+        barcode_to_prefix = lambda x: ''.join(x[c - 1] for c in sbs_cycles)
+        df_barcodes = (barcode_table.assign(prefix=lambda x: 
+                            x['barcode'].apply(barcode_to_prefix)))
+        if 'barcode' in df_barcodes and 'sgRNA' in df_barcodes:
+            df_barcodes = df_barcodes.drop('barcode', axis=1)
+        #only takes 10 cycles from the barcode, keeps the sgrna1 coloumn
+
+        barcode_info = df_barcodes.set_index('prefix')
+        return (df_combined
+                .join(barcode_info, on='cell_barcode_0')
+                .join(barcode_info.rename(columns=lambda x: x + '_1'), 
+                      on='cell_barcode_1')
+                )
+                # joins df_combined and barcode_info
+                # barcode_info= dataframe with sgrna and first 10 elements of barcode for 10 cycles
+                # df_combined = concatanation of cell barcode (df_cells) data and df_phenotype. Phenotype obtained from phenotype 
+                # returns df_combined- all rows of df_combined that has matching values cell_barcode_0 and cell_barcode_1 with the barcode_info dataframe
+
+    @staticmethod
+    def _annotate_SBS(log, df_reads):
+        # convert reads to a stack of integer-encoded bases
+        cycles, channels, height, width = log.shape
+        base_labels = ops.annotate.annotate_bases(df_reads, width=3, shape=(height, width))
+        annotated = np.zeros((cycles, channels + 1, height, width), 
+                            dtype=np.uint16)
+
+        annotated[:, :channels] = log
+        annotated[:, channels] = base_labels
+        return annotated
+
+    @staticmethod
+    def _annotate_SBS_extra(log, peaks, df_reads, barcode_table, sbs_cycles,
+                            shape=(1024, 1024)):
+        barcode_to_prefix = lambda x: ''.join(x[c - 1] for c in sbs_cycles)
+        barcodes = [barcode_to_prefix(x) for x in barcode_table['barcode']]
+
+        df_reads['mapped'] = df_reads['barcode'].isin(barcodes)
+        # convert reads to a stack of integer-encoded bases
+        plus = [[0, 1, 0],
+                [1, 1, 1],
+                [0, 1, 0]]
+        xcross = [[1, 0, 1],
+                  [0, 1, 0],
+                  [1, 0, 1]]
+        notch = [[1, 1, 1],
+                 [1, 1, 1],
+                 [1, 1, 0]]
+        notch2 = [[1, 1, 1],
+                 [1, 1, 1],
+                 [0, 1, 0]]
+        top_right = [[0, 0, 0],
+                     [0, 0, 0],
+                     [1, 0, 0]]
+
+        f = ops.annotate.annotate_bases
+        base_labels  = f(df_reads.query('mapped'), selem=notch)
+        base_labels += f(df_reads.query('~mapped'), selem=plus)
+        # Q_min converted to 30 point integer scale
+        Q_min = ops.annotate.annotate_points(df_reads, 'Q_min', selem=top_right)
+        Q_30 = (Q_min * 30).astype(int)
+        # a "donut" around each peak indicating the peak intensity
+        peaks_donut = skimage.morphology.dilation(peaks, selem=np.ones((3, 3)))
+        peaks_donut[peaks > 0] = 0 
+        # nibble some more
+        peaks_donut[base_labels.sum(axis=0) > 0] = 0
+        peaks_donut[Q_30 > 0] = 0
+
+        cycles, channels, height, width = log.shape
+        annotated = np.zeros((cycles, 
+            channels + 2, 
+            # channels + 3, 
+            height, width), dtype=np.uint16)
+
+        annotated[:, :channels] = log
+        annotated[:, channels] = base_labels
+        annotated[:, channels + 1] = peaks_donut
+        # annotated[:, channels + 2] = Q_30
+
+        return annotated[:, 1:]
+
+
+    @staticmethod
     def _extract_phenotype_translocation_ring(data_phenotype, nuclei, wildcards, width=3):
         selem = np.ones((width, width))
         perimeter = skimage.morphology.dilation(nuclei, selem)
@@ -429,6 +529,34 @@ class Snake():
         for name, f in methods:
             if name not in ('__doc__', '__module__') and name.startswith('_'):
                 Snake.add_method('Snake', name[1:], Snake.call_from_snakemake(f))
+
+
+
+    @staticmethod
+    def _extract_named_cell_nucleus_features(data, cells, nuclei, cell_features, nucleus_features,
+                                             wildcards, join='inner'):
+        """Extract named features for cell and nucleus labels and join the results.
+        """
+        assert 'label' in cell_features and 'label' in nucleus_features
+        df_phenotype = pd.concat([
+            Snake._extract_named_features(data, cells, cell_features, {})
+                .set_index('label').rename(columns=lambda x: x + '_cell'),
+            Snake._extract_named_features(data, nuclei, nucleus_features, {})
+                .set_index('label').rename(columns=lambda x: x + '_nucleus'),
+        ], join=join, axis=1).reset_index().rename(columns={'label': 'cell'})
+        
+        for k,v in sorted(wildcards.items()):
+            df_phenotype[k] = v
+
+        return df_phenotype
+    @staticmethod
+    def _extract_named_features(data, labels, feature_names, wildcards):
+        """Extracts features in dictionary and combines with generic region
+        features.
+        """
+        features = ops.features.make_feature_dict(feature_names)
+        return Snake._extract_features(data, labels, wildcards, features)
+
 
     @staticmethod
     def call_from_snakemake(f):
@@ -616,3 +744,4 @@ def load_well_tile_list(filename):
     elif filename.endswith('csv'):
         wells, tiles = pd.read_csv(filename)[['well', 'tile']].values.T
     return wells, tiles
+

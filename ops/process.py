@@ -68,7 +68,17 @@ def find_cells(nuclei, mask, remove_boundary_cells=True):
     Expands labeled nuclei to cells, constrained to where mask is >0.
     """
     distance = ndimage.distance_transform_cdt(nuclei == 0)
-    cells = skimage.morphology.watershed(distance, nuclei, mask=mask)
+
+    # smooth
+    #distance = skimage.filters.gaussian(distance, sigma=4) #Sagar
+    #mask = skimage.morphology.remove_small_objects(mask, min_size=10) #sagar
+
+    #cells = skimage.morphology.watershed(distance, nuclei, mask=mask)
+    cells =  skimage.segmentation.watershed(distance, nuclei, mask=mask)
+
+    # remove small object
+    # fill holes
+
     # remove cells touching the boundary
     if remove_boundary_cells:
         cut = np.concatenate([cells[0,:], cells[-1,:], 
@@ -161,9 +171,11 @@ class Align:
             if i == 0:
                 offsets += [(0, 0)]
             else:
-                offset, _, _ = skimage.feature.register_translation(
+                offset, _, _ = skimage.registration.phase_cross_correlation(
                                 src, target, upsample_factor=upsample_factor)
                 offsets += [offset]
+
+                #The function loops over each image in the data_ list and calculates its offset relative to the target image using skimage.registration.phase_cross_correlation function. 
         return np.array(offsets)
 
     @staticmethod
@@ -193,7 +205,7 @@ class Align:
     def align_between_cycles(data, channel_index, upsample_factor=4, window=1,
     		return_offsets=False):
         # offsets from target channel
-        target = Align.apply_window(data[:, channel_index], window)
+        target = Align.apply_window(data[:, channel_index], window) # target is windowed version of the original data with border pixels removed
         offsets = Align.calculate_offsets(target, upsample_factor=upsample_factor)
 
         # apply to all channels
@@ -211,7 +223,7 @@ class Align:
     def apply_window(data, window):
         height, width = data.shape[-2:]
         find_border = lambda x: int((x/2.) * (1 - 1/float(window)))
-        i, j = find_border(height), find_border(width)
+        i, j = find_border(height), find_border(width) # computes the number of border pixels to remove
         return data[..., i:height - i, j:width - j]
 
 
@@ -222,6 +234,7 @@ def find_nuclei(dapi, threshold, radius=15, area_min=50, area_max=500,
     """
     """
 
+    radius = 30 # SAGAR
     mask = binarize(dapi, radius, area_min)
     labeled = skimage.measure.label(mask)
     labeled = filter_by_region(labeled, score, threshold, intensity_image=dapi) > 0
@@ -291,7 +304,8 @@ def apply_watershed(img, smooth=4):
                     exclude_border=False)
 
     markers = ndimage.label(local_max)[0]
-    result = skimage.morphology.watershed(-distance, markers, mask=img)
+    #result = skimage.morphology.watershed(-distance, markers, mask=img)
+    result = skimage.segmentation.watershed(-distance, markers, mask=img)
     return result.astype(np.uint16)
 
 
